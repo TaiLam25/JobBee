@@ -25,7 +25,11 @@ const updateProfile = async (accountId, { full_name, avatar_url, education, skil
 
 const getCVsByProfileId = async (profileId) => {
     const result = await db.query(
-        'SELECT * FROM cv_version WHERE profile_id = $1 ORDER BY updated_date DESC',
+        `SELECT cv.*, 
+                (SELECT COUNT(*) FROM job_application ja WHERE ja.cv_version_id = cv.id)::int AS applications_count
+         FROM cv_version cv 
+         WHERE cv.profile_id = $1 
+         ORDER BY cv.updated_date DESC`,
         [profileId]
     );
     return result.rows;

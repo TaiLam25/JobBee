@@ -1,3 +1,4 @@
+const db = require('../../config/db');
 const profileModel = require('./profile.model');
 const AppError = require('../../utils/app-error');
 const { uploadToSupabase } = require('../../config/supabase');
@@ -99,7 +100,32 @@ const deleteCV = async (accountId, cvId) => {
     if (!existing) {
         throw new AppError(404, 'Không tìm thấy bản CV để xóa');
     }
+
+    // Check if CV is currently used in job_application
+    const appCheck = await db.query(
+        'SELECT COUNT(*) FROM job_application WHERE cv_version_id = $1',
+        [cvId]
+    );
+    const count = parseInt(appCheck.rows[0].count, 10);
+    if (count > 0) {
+        throw new AppError(
+            400,
+            `Không thể xóa bản CV này vì bạn đã dùng nó để nộp ${count} đơn ứng tuyển cho Nhà tuyển dụng. Bạn có thể tải lên bản CV mới và đặt làm mặc định.`
+        );
+    }
+
     await profileModel.deleteCV(cvId, profile.id);
+
+    // If deleted CV was default, promote the latest remaining CV as default
+    if (existing.is_default) {
+        const remaining = await db.query(
+            'SELECT id FROM cv_version WHERE profile_id = $1 ORDER BY updated_date DESC LIMIT 1',
+            [profile.id]
+        );
+        if (remaining.rows[0]) {
+            await db.query('UPDATE cv_version SET is_default = TRUE WHERE id = $1', [remaining.rows[0].id]);
+        }
+    }
 };
 
 const setDefaultCV = async (accountId, cvId) => {

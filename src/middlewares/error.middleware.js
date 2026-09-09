@@ -12,6 +12,10 @@ const errorHandler = (err, req, res, next) => {
         // Postgres unique violation
         statusCode = 409;
         message = 'Dữ liệu đã tồn tại trong hệ thống (vi phạm ràng buộc duy nhất)';
+    } else if (err.code === '23503') {
+        // Postgres foreign key violation
+        statusCode = 400;
+        message = 'Không thể xóa hoặc thay đổi dữ liệu này vì đang được liên kết trong các đơn ứng tuyển hoặc dữ liệu khác của hệ thống.';
     } else if (err.name === 'JsonWebTokenError') {
         statusCode = 401;
         message = 'Token xác thực không hợp lệ';
