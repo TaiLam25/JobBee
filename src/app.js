@@ -23,6 +23,9 @@ const provinceRoutes = require('./modules/job/province.routes');
 
 const app = express();
 
+// Trust reverse proxy headers (Render, Cloudflare, Heroku, Railway)
+app.set('trust proxy', 1);
+
 // Security Headers (Requirement 4)
 app.use(helmet());
 
@@ -52,6 +55,7 @@ const globalLimiter = rateLimit({
     max: 1000,
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { xForwardedForHeader: false },
     message: {
         success: false,
         message: 'Quá nhiều yêu cầu từ IP của bạn, vui lòng thử lại sau 15 phút.',
@@ -66,6 +70,7 @@ const authLimiter = rateLimit({
     max: 30, // 30 attempts per 15 minutes
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { xForwardedForHeader: false },
     message: {
         success: false,
         message: 'Quá nhiều yêu cầu đăng nhập/đăng ký. Vui lòng thử lại sau 15 phút.',
