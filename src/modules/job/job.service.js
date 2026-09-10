@@ -49,7 +49,7 @@ const createJob = async (accountId, data) => {
         }
     }
 
-    // Transaction for creating job_posting and optional small_job_posting
+    // Transaction for creating job_posting, small_job_posting, and industry associations
     const result = await db.withTransaction(async (client) => {
         // Small job is auto-approved, full_time requires admin approval
         const initialStatus = data.job_type === 'small_job' ? 'approved' : 'pending';
@@ -62,8 +62,15 @@ const createJob = async (accountId, data) => {
             salary: data.salary,
             location: data.location,
             job_type: data.job_type,
+            province_id: data.province_id || null,
+            tags: data.tags || [],
             approval_status: initialStatus,
         });
+
+        // Insert industry tags
+        if (data.industry_ids && Array.isArray(data.industry_ids)) {
+            await jobModel.setJobIndustries(client, job.id, data.industry_ids);
+        }
 
         if (data.job_type === 'small_job') {
             if (!data.working_hours || !data.number_of_days || !data.positions_needed || !data.start_time) {
@@ -89,25 +96,43 @@ const createJob = async (accountId, data) => {
 
 const updateJob = async (accountId, jobId, data) => {
     const employer = await companyModel.getCompanyByAccountId(accountId);
+    if (!employer) {
+        throw new AppError(404, 'Tài khoản nhà tuyển dụng chưa được tạo');
+    }
+
     const updated = await jobModel.updateJobPosting(jobId, employer.id, data);
     if (!updated) {
         throw new AppError(404, 'Không tìm thấy tin tuyển dụng hoặc không có quyền sửa');
     }
-    return updated;
+
+    if (data.industry_ids !== undefined && Array.isArray(data.industry_ids)) {
+        await jobModel.setJobIndustries(null, jobId, data.industry_ids);
+    }
+
+    return await jobModel.getJobById(jobId);
 };
 
 const deleteJob = async (accountId, jobId) => {
     const employer = await companyModel.getCompanyByAccountId(accountId);
+    if (!employer) {
+        throw new AppError(404, 'Tài khoản nhà tuyển dụng chưa được tạo');
+    }
     await jobModel.deleteJobPosting(jobId, employer.id);
 };
 
 const getEmployerJobs = async (accountId) => {
     const employer = await companyModel.getCompanyByAccountId(accountId);
+    if (!employer) {
+        throw new AppError(404, 'Tài khoản nhà tuyển dụng chưa được tạo');
+    }
     return await jobModel.getEmployerJobs(employer.id);
 };
 
 const getJobStats = async (accountId, jobId) => {
     const employer = await companyModel.getCompanyByAccountId(accountId);
+    if (!employer) {
+        throw new AppError(404, 'Tài khoản nhà tuyển dụng chưa được tạo');
+    }
     const stats = await jobModel.getJobStats(jobId, employer.id);
     if (!stats) {
         throw new AppError(404, 'Không tìm thấy thông tin thống kê tin tuyển dụng này');

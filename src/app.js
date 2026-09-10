@@ -19,6 +19,7 @@ const reviewRoutes = require('./modules/review/review.routes');
 const aiRoutes = require('./modules/ai/ai.routes');
 const adminRoutes = require('./modules/admin/admin.routes');
 const notificationRoutes = require('./modules/notification/notification.routes');
+const provinceRoutes = require('./modules/job/province.routes');
 
 const app = express();
 
@@ -113,6 +114,7 @@ app.use(API_PREFIX, reviewRoutes);
 app.use(API_PREFIX, aiRoutes);
 app.use(API_PREFIX, adminRoutes);
 app.use(API_PREFIX, notificationRoutes);
+app.use(API_PREFIX, provinceRoutes);
 
 // Centralized Error Handler (Requirement 8)
 app.use(errorHandler);

@@ -1,6 +1,34 @@
 const db = require('../../config/db');
 
-const getJobs = async ({ search, location, job_type, salary_range, page = 1, limit = 10, sort = 'posted_date_desc', is_admin = false }) => {
+const parseArrayParam = (val) => {
+    if (!val) return [];
+    if (Array.isArray(val)) return val.map((x) => parseInt(x, 10)).filter((n) => !isNaN(n));
+    if (typeof val === 'string') {
+        return val
+            .split(',')
+            .map((x) => parseInt(x.trim(), 10))
+            .filter((n) => !isNaN(n));
+    }
+    const num = parseInt(val, 10);
+    return isNaN(num) ? [] : [num];
+};
+
+const getJobs = async ({
+    search,
+    location,
+    province_id,
+    province_ids,
+    industry_id,
+    industry_ids,
+    tag,
+    tags,
+    job_type,
+    salary_range,
+    page = 1,
+    limit = 10,
+    sort = 'posted_date_desc',
+    is_admin = false,
+}) => {
     const offset = (page - 1) * limit;
     const params = [];
     const conditions = [];
@@ -18,6 +46,40 @@ const getJobs = async ({ search, location, job_type, salary_range, page = 1, lim
     if (location) {
         params.push(`%${location}%`);
         conditions.push(`jp.location ILIKE $${params.length}`);
+    }
+
+    // Filter by Province (34 provinces/cities)
+    const pIds = [...parseArrayParam(province_id), ...parseArrayParam(province_ids)];
+    const uniqueProvinceIds = [...new Set(pIds)];
+    if (uniqueProvinceIds.length > 0) {
+        params.push(uniqueProvinceIds);
+        conditions.push(`jp.province_id = ANY($${params.length}::int[])`);
+    }
+
+    // Filter by Industry / Industry Tags (Junction Table job_industry)
+    const indIds = [...parseArrayParam(industry_id), ...parseArrayParam(industry_ids)];
+    const uniqueIndustryIds = [...new Set(indIds)];
+    if (uniqueIndustryIds.length > 0) {
+        params.push(uniqueIndustryIds);
+        conditions.push(`EXISTS (
+            SELECT 1 FROM job_industry ji 
+            WHERE ji.job_posting_id = jp.id AND ji.industry_id = ANY($${params.length}::int[])
+        )`);
+    }
+
+    // Filter by custom tags
+    const tagList = [];
+    if (tag) {
+        if (Array.isArray(tag)) tagList.push(...tag);
+        else tagList.push(...tag.split(',').map((t) => t.trim()).filter(Boolean));
+    }
+    if (tags) {
+        if (Array.isArray(tags)) tagList.push(...tags);
+        else tagList.push(...tags.split(',').map((t) => t.trim()).filter(Boolean));
+    }
+    if (tagList.length > 0) {
+        params.push(tagList);
+        conditions.push(`jp.tags && $${params.length}::text[]`);
     }
 
     if (job_type && job_type !== 'all') {
@@ -46,7 +108,7 @@ const getJobs = async ({ search, location, job_type, salary_range, page = 1, lim
     else if (sort === 'trust_score_desc') orderBy = 'e.trust_score DESC, jp.posted_date DESC';
 
     const countQuery = `
-        SELECT COUNT(*) 
+        SELECT COUNT(DISTINCT jp.id) 
         FROM job_posting jp 
         JOIN employer e ON jp.employer_id = e.id
         LEFT JOIN small_job_posting sjp ON sjp.job_posting_id = jp.id 
@@ -56,7 +118,10 @@ const getJobs = async ({ search, location, job_type, salary_range, page = 1, lim
     const total = parseInt(totalResult.rows[0].count, 10);
 
     const dataQuery = `
-        SELECT jp.*, e.company_name, e.avatar_url as company_logo, e.company_image_url, e.verification_status, e.trust_score as employer_trust_score,
+        SELECT jp.*, 
+               p.name as province_name,
+               p.type as province_type,
+               e.company_name, e.avatar_url as company_logo, e.company_image_url, e.verification_status, e.trust_score as employer_trust_score,
                sjp.working_hours, sjp.number_of_days, sjp.positions_needed, sjp.start_time, sjp.is_closed,
                COALESCE((
                    SELECT COUNT(*)::int 
@@ -67,9 +132,16 @@ const getJobs = async ({ search, location, job_type, salary_range, page = 1, lim
                    SELECT ROUND(AVG(r.score)::numeric, 2)::float 
                    FROM review r 
                    WHERE r.reviewee_id = e.account_id
-               ), 5.0)::float as employer_rating
+               ), 5.0)::float as employer_rating,
+               COALESCE((
+                   SELECT json_agg(json_build_object('id', ind.id, 'name', ind.name, 'slug', ind.slug, 'icon', ind.icon))
+                   FROM job_industry ji 
+                   JOIN industry ind ON ji.industry_id = ind.id 
+                   WHERE ji.job_posting_id = jp.id
+               ), '[]'::json) as industries
         FROM job_posting jp
         JOIN employer e ON jp.employer_id = e.id
+        LEFT JOIN province p ON jp.province_id = p.id
         LEFT JOIN small_job_posting sjp ON sjp.job_posting_id = jp.id
         ${whereClause}
         ORDER BY ${orderBy}
@@ -91,7 +163,10 @@ const getJobs = async ({ search, location, job_type, salary_range, page = 1, lim
 
 const getJobById = async (id) => {
     const result = await db.query(
-        `SELECT jp.*, e.company_name, e.avatar_url as company_logo, e.company_image_url, e.address as employer_address, e.verification_status, e.trust_score as employer_trust_score,
+        `SELECT jp.*, 
+                p.name as province_name,
+                p.type as province_type,
+                e.company_name, e.avatar_url as company_logo, e.company_image_url, e.address as employer_address, e.verification_status, e.trust_score as employer_trust_score,
                 sjp.working_hours, sjp.number_of_days, sjp.positions_needed, sjp.start_time, sjp.is_closed,
                 COALESCE((
                     SELECT COUNT(*)::int 
@@ -102,9 +177,16 @@ const getJobById = async (id) => {
                     SELECT ROUND(AVG(r.score)::numeric, 2)::float 
                     FROM review r 
                     WHERE r.reviewee_id = e.account_id
-                ), 5.0)::float as employer_rating
+                ), 5.0)::float as employer_rating,
+                COALESCE((
+                    SELECT json_agg(json_build_object('id', ind.id, 'name', ind.name, 'slug', ind.slug, 'icon', ind.icon))
+                    FROM job_industry ji 
+                    JOIN industry ind ON ji.industry_id = ind.id 
+                    WHERE ji.job_posting_id = jp.id
+                ), '[]'::json) as industries
          FROM job_posting jp
          JOIN employer e ON jp.employer_id = e.id
+         LEFT JOIN province p ON jp.province_id = p.id
          LEFT JOIN small_job_posting sjp ON sjp.job_posting_id = jp.id
          WHERE jp.id = $1`,
         [id]
@@ -112,13 +194,13 @@ const getJobById = async (id) => {
     return result.rows[0];
 };
 
-const createJobPosting = async (client, { employer_id, title, job_description, requirements, salary, location, job_type, approval_status = 'pending' }) => {
+const createJobPosting = async (client, { employer_id, title, job_description, requirements, salary, location, job_type, province_id = null, tags = [], approval_status = 'pending' }) => {
     const queryRunner = client || db;
     const result = await queryRunner.query(
-        `INSERT INTO job_posting (employer_id, title, job_description, requirements, salary, location, job_type, approval_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO job_posting (employer_id, title, job_description, requirements, salary, location, job_type, province_id, tags, approval_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING *`,
-        [employer_id, title, job_description, requirements, salary, location, job_type, approval_status]
+        [employer_id, title, job_description, requirements, salary, location, job_type, province_id || null, tags || [], approval_status]
     );
     return result.rows[0];
 };
@@ -134,6 +216,20 @@ const createSmallJobPosting = async (client, { job_posting_id, working_hours, nu
     return result.rows[0];
 };
 
+const setJobIndustries = async (client, jobId, industryIds) => {
+    const queryRunner = client || db;
+    await queryRunner.query('DELETE FROM job_industry WHERE job_posting_id = $1', [jobId]);
+    if (Array.isArray(industryIds) && industryIds.length > 0) {
+        const cleanIds = industryIds.map((id) => parseInt(id, 10)).filter((n) => !isNaN(n));
+        for (const indId of cleanIds) {
+            await queryRunner.query(
+                `INSERT INTO job_industry (job_posting_id, industry_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+                [jobId, indId]
+            );
+        }
+    }
+};
+
 const updateJobPosting = async (id, employer_id, data) => {
     const result = await db.query(
         `UPDATE job_posting 
@@ -141,10 +237,12 @@ const updateJobPosting = async (id, employer_id, data) => {
              job_description = COALESCE($2, job_description),
              requirements = COALESCE($3, requirements),
              salary = COALESCE($4, salary),
-             location = COALESCE($5, location)
-         WHERE id = $6 AND employer_id = $7
+             location = COALESCE($5, location),
+             province_id = COALESCE($6, province_id),
+             tags = COALESCE($7, tags)
+         WHERE id = $8 AND employer_id = $9
          RETURNING *`,
-        [data.title, data.job_description, data.requirements, data.salary, data.location, id, employer_id]
+        [data.title, data.job_description, data.requirements, data.salary, data.location, data.province_id !== undefined ? data.province_id : null, data.tags !== undefined ? data.tags : null, id, employer_id]
     );
     return result.rows[0];
 };
@@ -155,7 +253,10 @@ const deleteJobPosting = async (id, employer_id) => {
 
 const getEmployerJobs = async (employerId) => {
     const result = await db.query(
-        `SELECT jp.*, sjp.working_hours, sjp.number_of_days, sjp.positions_needed, sjp.start_time, sjp.is_closed,
+        `SELECT jp.*, 
+                p.name as province_name,
+                p.type as province_type,
+                sjp.working_hours, sjp.number_of_days, sjp.positions_needed, sjp.start_time, sjp.is_closed,
                 COUNT(ja.id)::int as total_applications,
                 COUNT(ja.id)::int as applicants_count,
                 COUNT(ja.id)::int as applicantCount,
@@ -179,12 +280,19 @@ const getEmployerJobs = async (employerId) => {
                     SELECT COUNT(*)::int 
                     FROM small_job_registration sjr 
                     WHERE sjr.small_job_posting_id = sjp.id AND sjr.status = 'completed'
-                ), 0) as completed_count
+                ), 0) as completed_count,
+                COALESCE((
+                    SELECT json_agg(json_build_object('id', ind.id, 'name', ind.name, 'slug', ind.slug, 'icon', ind.icon))
+                    FROM job_industry ji 
+                    JOIN industry ind ON ji.industry_id = ind.id 
+                    WHERE ji.job_posting_id = jp.id
+                ), '[]'::json) as industries
          FROM job_posting jp
+         LEFT JOIN province p ON jp.province_id = p.id
          LEFT JOIN small_job_posting sjp ON sjp.job_posting_id = jp.id
          LEFT JOIN job_application ja ON ja.job_posting_id = jp.id
          WHERE jp.employer_id = $1
-         GROUP BY jp.id, sjp.id
+         GROUP BY jp.id, p.id, sjp.id
          ORDER BY jp.posted_date DESC`,
         [employerId]
     );
@@ -229,6 +337,7 @@ module.exports = {
     getJobById,
     createJobPosting,
     createSmallJobPosting,
+    setJobIndustries,
     updateJobPosting,
     deleteJobPosting,
     getEmployerJobs,
