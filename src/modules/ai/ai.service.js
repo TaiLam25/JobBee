@@ -88,7 +88,7 @@ const analyzeMatch = async (accountId, { cv_id, job_id }) => {
 - Tiêu đề: ${job.title}
 - Mô tả: ${job.job_description}
 - Yêu cầu: ${job.requirements}
-- Mức lương: ${job.salary}
+- Mức lương: ${job.is_negotiable ? 'Thỏa thuận' : (job.salary_min === job.salary_max ? `${job.salary_min} VNĐ` : `${job.salary_min} - ${job.salary_max} VNĐ`)}
 - Loại hình: ${job.job_type}
 
 [HỒ SƠ ỨNG VIÊN]:

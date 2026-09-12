@@ -11,8 +11,9 @@ router.put('/jobs/:id', authenticateToken, authorizeRoles('employer'), jobContro
 router.delete('/jobs/:id', authenticateToken, authorizeRoles('employer'), jobController.deleteJob);
 router.get('/jobs/:id/stats', authenticateToken, authorizeRoles('employer'), jobController.getJobStats);
 
-// Public routes
+// Public routes (specific paths first)
 router.get('/jobs/platform-stats', jobController.getPlatformStats);
+router.get('/jobs/salary-range', jobController.getSalaryRange);
 router.get('/jobs', jobController.getJobs);
 router.get('/jobs/:id', jobController.getJobById);
 

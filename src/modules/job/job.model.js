@@ -24,6 +24,9 @@ const getJobs = async ({
     tags,
     job_type,
     salary_range,
+    salary_min,
+    salary_max,
+    include_negotiable = true,
     page = 1,
     limit = 10,
     sort = 'posted_date_desc',
@@ -87,18 +90,54 @@ const getJobs = async ({
         conditions.push(`jp.job_type = $${params.length}`);
     }
 
-    if (salary_range) {
-        if (salary_range === 'negotiable') {
-            conditions.push("(jp.salary ILIKE '%thỏa thuận%' OR jp.salary ILIKE '%thoa thuan%' OR jp.salary ILIKE '%deal%')");
-        } else if (salary_range === 'under_10') {
-            conditions.push("(jp.salary ~* '([1-9]|10)[ ]*tr|triệu' OR jp.salary ~* '^[0-9]{1,2}[0-9]k' OR jp.salary ILIKE '%giờ%')");
+    // Salary Filtering with Overlap Logic & include_negotiable
+    let parsedMin = salary_min !== undefined && salary_min !== '' && salary_min !== null ? parseInt(salary_min, 10) : null;
+    let parsedMax = salary_max !== undefined && salary_max !== '' && salary_max !== null ? parseInt(salary_max, 10) : null;
+
+    // Handle legacy salary_range if provided
+    if (salary_range && parsedMin === null && parsedMax === null) {
+        if (salary_range === 'under_10') {
+            parsedMin = 0;
+            parsedMax = 10000000;
         } else if (salary_range === '10_20') {
-            conditions.push("(jp.salary ~* '(1[0-9]|20)[ ]*tr|triệu')");
+            parsedMin = 10000000;
+            parsedMax = 20000000;
         } else if (salary_range === '20_30') {
-            conditions.push("(jp.salary ~* '(2[0-9]|30)[ ]*tr|triệu')");
+            parsedMin = 20000000;
+            parsedMax = 30000000;
         } else if (salary_range === 'above_30') {
-            conditions.push("(jp.salary ~* '([3-9][0-9]|100)[ ]*tr|triệu' OR jp.salary ILIKE '%USD%' OR jp.salary ILIKE '%$%' OR jp.salary ~* '3[0-9]|4[0-9]|5[0-9]')");
+            parsedMin = 30000000;
+            parsedMax = 1000000000;
         }
+    }
+
+    const incNeg = include_negotiable === undefined || include_negotiable === true || include_negotiable === 'true' || include_negotiable === 1 || include_negotiable === '1';
+
+    if (parsedMin !== null || parsedMax !== null) {
+        let rangeClause = '';
+        if (parsedMin !== null && parsedMax !== null) {
+            params.push(parsedMin);
+            const minIdx = params.length;
+            params.push(parsedMax);
+            const maxIdx = params.length;
+            rangeClause = `(jp.is_negotiable = FALSE AND jp.salary_max >= $${minIdx} AND jp.salary_min <= $${maxIdx})`;
+        } else if (parsedMin !== null) {
+            params.push(parsedMin);
+            const minIdx = params.length;
+            rangeClause = `(jp.is_negotiable = FALSE AND jp.salary_max >= $${minIdx})`;
+        } else if (parsedMax !== null) {
+            params.push(parsedMax);
+            const maxIdx = params.length;
+            rangeClause = `(jp.is_negotiable = FALSE AND jp.salary_min <= $${maxIdx})`;
+        }
+
+        if (incNeg) {
+            conditions.push(`(jp.is_negotiable = TRUE OR ${rangeClause})`);
+        } else {
+            conditions.push(rangeClause);
+        }
+    } else if (salary_range === 'negotiable') {
+        conditions.push('jp.is_negotiable = TRUE');
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -161,6 +200,23 @@ const getJobs = async ({
     };
 };
 
+const getSalaryRangeBounds = async () => {
+    const result = await db.query(`
+        SELECT 
+            COALESCE(MIN(salary_min), 0)::int as min, 
+            COALESCE(MAX(salary_max), 100000000)::int as max
+        FROM job_posting 
+        WHERE (approval_status = 'approved' OR approval_status IS NULL) 
+          AND is_negotiable = FALSE 
+          AND salary_min IS NOT NULL 
+          AND salary_max IS NOT NULL
+    `);
+    return {
+        min: result.rows[0]?.min !== null ? parseInt(result.rows[0].min, 10) : 0,
+        max: result.rows[0]?.max !== null ? parseInt(result.rows[0].max, 10) : 100000000,
+    };
+};
+
 const getJobById = async (id) => {
     const result = await db.query(
         `SELECT jp.*, 
@@ -194,13 +250,30 @@ const getJobById = async (id) => {
     return result.rows[0];
 };
 
-const createJobPosting = async (client, { employer_id, title, job_description, requirements, salary, location, job_type, province_id = null, tags = [], approval_status = 'pending' }) => {
+const createJobPosting = async (client, { 
+    employer_id, 
+    title, 
+    job_description, 
+    requirements, 
+    salary_min = null, 
+    salary_max = null, 
+    is_negotiable = false, 
+    location, 
+    job_type, 
+    province_id = null, 
+    tags = [], 
+    approval_status = 'pending' 
+}) => {
     const queryRunner = client || db;
+    const finalMin = is_negotiable ? null : (salary_min !== undefined && salary_min !== null ? parseInt(salary_min, 10) : null);
+    const finalMax = is_negotiable ? null : (salary_max !== undefined && salary_max !== null ? parseInt(salary_max, 10) : null);
+    const finalNeg = Boolean(is_negotiable);
+
     const result = await queryRunner.query(
-        `INSERT INTO job_posting (employer_id, title, job_description, requirements, salary, location, job_type, province_id, tags, approval_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `INSERT INTO job_posting (employer_id, title, job_description, requirements, salary_min, salary_max, is_negotiable, location, job_type, province_id, tags, approval_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING *`,
-        [employer_id, title, job_description, requirements, salary, location, job_type, province_id || null, tags || [], approval_status]
+        [employer_id, title, job_description, requirements, finalMin, finalMax, finalNeg, location, job_type, province_id || null, tags || [], approval_status]
     );
     return result.rows[0];
 };
@@ -231,18 +304,44 @@ const setJobIndustries = async (client, jobId, industryIds) => {
 };
 
 const updateJobPosting = async (id, employer_id, data) => {
+    const isNeg = data.is_negotiable !== undefined ? Boolean(data.is_negotiable) : null;
+    const sMin = data.salary_min !== undefined && data.salary_min !== null ? parseInt(data.salary_min, 10) : null;
+    const sMax = data.salary_max !== undefined && data.salary_max !== null ? parseInt(data.salary_max, 10) : null;
+
     const result = await db.query(
         `UPDATE job_posting 
          SET title = COALESCE($1, title),
              job_description = COALESCE($2, job_description),
              requirements = COALESCE($3, requirements),
-             salary = COALESCE($4, salary),
-             location = COALESCE($5, location),
-             province_id = COALESCE($6, province_id),
-             tags = COALESCE($7, tags)
-         WHERE id = $8 AND employer_id = $9
+             salary_min = CASE 
+                 WHEN $4::boolean = TRUE THEN NULL 
+                 WHEN $5::int IS NOT NULL THEN $5::int 
+                 ELSE salary_min 
+             END,
+             salary_max = CASE 
+                 WHEN $4::boolean = TRUE THEN NULL 
+                 WHEN $6::int IS NOT NULL THEN $6::int 
+                 ELSE salary_max 
+             END,
+             is_negotiable = COALESCE($4, is_negotiable),
+             location = COALESCE($7, location),
+             province_id = COALESCE($8, province_id),
+             tags = COALESCE($9, tags)
+         WHERE id = $10 AND employer_id = $11
          RETURNING *`,
-        [data.title, data.job_description, data.requirements, data.salary, data.location, data.province_id !== undefined ? data.province_id : null, data.tags !== undefined ? data.tags : null, id, employer_id]
+        [
+            data.title, 
+            data.job_description, 
+            data.requirements, 
+            isNeg, 
+            sMin, 
+            sMax, 
+            data.location, 
+            data.province_id !== undefined ? data.province_id : null, 
+            data.tags !== undefined ? data.tags : null, 
+            id, 
+            employer_id
+        ]
     );
     return result.rows[0];
 };
@@ -334,6 +433,7 @@ const getPlatformStats = async () => {
 
 module.exports = {
     getJobs,
+    getSalaryRangeBounds,
     getJobById,
     createJobPosting,
     createSmallJobPosting,

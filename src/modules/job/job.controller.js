@@ -10,6 +10,15 @@ const getJobs = async (req, res, next) => {
     }
 };
 
+const getSalaryRange = async (req, res, next) => {
+    try {
+        const bounds = await jobService.getSalaryRangeBounds();
+        return sendResponse(res, 200, 'Lấy giới hạn khoảng lương thành công', bounds);
+    } catch (error) {
+        next(error);
+    }
+};
+
 const getJobById = async (req, res, next) => {
     try {
         const job = await jobService.getJobById(req.params.id);
@@ -64,7 +73,7 @@ const getJobStats = async (req, res, next) => {
     }
 };
 
-const getPlatformStats = async (req, res, next) => {
+const getPlatformStats = async () => {
     try {
         const stats = await jobService.getPlatformStats();
         return sendResponse(res, 200, 'Lấy thông số thống kê nền tảng thành công', stats);
@@ -75,6 +84,7 @@ const getPlatformStats = async (req, res, next) => {
 
 module.exports = {
     getJobs,
+    getSalaryRange,
     getJobById,
     createJob,
     updateJob,

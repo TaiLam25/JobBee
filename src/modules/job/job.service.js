@@ -7,6 +7,10 @@ const getJobs = async (filters) => {
     return await jobModel.getJobs(filters);
 };
 
+const getSalaryRangeBounds = async () => {
+    return await jobModel.getSalaryRangeBounds();
+};
+
 const getJobById = async (id) => {
     const job = await jobModel.getJobById(id);
     if (!job) {
@@ -21,6 +25,23 @@ const createJob = async (accountId, data) => {
     const employer = await companyModel.getCompanyByAccountId(accountId);
     if (!employer) {
         throw new AppError(404, 'Tài khoản nhà tuyển dụng chưa được tạo');
+    }
+
+    // Validation for Salary
+    const isNegotiable = Boolean(data.is_negotiable === true || data.is_negotiable === 'true');
+    let salaryMin = null;
+    let salaryMax = null;
+
+    if (isNegotiable) {
+        salaryMin = null;
+        salaryMax = null;
+    } else {
+        salaryMin = parseInt(data.salary_min, 10);
+        salaryMax = parseInt(data.salary_max, 10);
+
+        if (isNaN(salaryMin) || isNaN(salaryMax) || salaryMin < 0 || salaryMax < 0 || salaryMin > salaryMax) {
+            throw new AppError(400, 'Mức lương không hợp lệ. Lương tối thiểu và tối đa phải là số nguyên dương và Lương tối thiểu <= Lương tối đa.');
+        }
     }
 
     // Business Rule 13: Unverified employers can ONLY post small_job. Full-time jobs require 'verified' status.
@@ -59,7 +80,9 @@ const createJob = async (accountId, data) => {
             title: data.title,
             job_description: data.job_description,
             requirements: data.requirements,
-            salary: data.salary,
+            salary_min: salaryMin,
+            salary_max: salaryMax,
+            is_negotiable: isNegotiable,
             location: data.location,
             job_type: data.job_type,
             province_id: data.province_id || null,
@@ -98,6 +121,16 @@ const updateJob = async (accountId, jobId, data) => {
     const employer = await companyModel.getCompanyByAccountId(accountId);
     if (!employer) {
         throw new AppError(404, 'Tài khoản nhà tuyển dụng chưa được tạo');
+    }
+
+    if (data.is_negotiable !== undefined && !data.is_negotiable) {
+        if (data.salary_min !== undefined && data.salary_max !== undefined) {
+            const min = parseInt(data.salary_min, 10);
+            const max = parseInt(data.salary_max, 10);
+            if (isNaN(min) || isNaN(max) || min < 0 || max < 0 || min > max) {
+                throw new AppError(400, 'Mức lương không hợp lệ. Lương tối thiểu và tối đa phải là số nguyên dương và Lương tối thiểu <= Lương tối đa.');
+            }
+        }
     }
 
     const updated = await jobModel.updateJobPosting(jobId, employer.id, data);
@@ -146,6 +179,7 @@ const getPlatformStats = async () => {
 
 module.exports = {
     getJobs,
+    getSalaryRangeBounds,
     getJobById,
     createJob,
     updateJob,

@@ -419,7 +419,7 @@ const getMyRegistrations = async (accountId) => {
     const result = await db.query(
         `SELECT sjr.*, 
                 jp.id as job_id, jp.id as job_posting_id,
-                jp.title as job_title, jp.salary, jp.location, jp.approval_status as job_approval_status,
+                jp.title as job_title, jp.salary_min, jp.salary_max, jp.is_negotiable, jp.location, jp.approval_status as job_approval_status,
                 sjp.working_hours, sjp.number_of_days, sjp.positions_needed, sjp.start_time, sjp.is_closed,
                 e.company_name, e.avatar_url as company_logo, e.company_image_url, e.verification_status as employer_verification_status, e.trust_score as employer_trust_score,
                 (SELECT json_build_object('id', r.id, 'score', r.score, 'comment', r.comment, 'review_date', r.review_date)

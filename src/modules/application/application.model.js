@@ -33,7 +33,7 @@ const createApplication = async (client, { cv_version_id, job_posting_id }) => {
 
 const getCandidateApplications = async (candidateAccountId) => {
     const result = await db.query(
-        `SELECT ja.*, jp.title as job_title, jp.salary, jp.location, e.company_name, cv.cv_name
+        `SELECT ja.*, jp.title as job_title, jp.salary_min, jp.salary_max, jp.is_negotiable, jp.location, e.company_name, cv.cv_name
          FROM job_application ja
          JOIN cv_version cv ON ja.cv_version_id = cv.id
          JOIN candidate_profile cp ON cv.profile_id = cp.id
