@@ -73,7 +73,7 @@ const getJobStats = async (req, res, next) => {
     }
 };
 
-const getPlatformStats = async () => {
+const getPlatformStats = async (req, res, next) => {
     try {
         const stats = await jobService.getPlatformStats();
         return sendResponse(res, 200, 'Lấy thông số thống kê nền tảng thành công', stats);
