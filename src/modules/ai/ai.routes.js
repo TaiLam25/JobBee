@@ -5,26 +5,34 @@ const { authenticateToken, optionalAuthenticateToken, authorizeRoles } = require
 
 const router = express.Router();
 
-// Memory storage for fast CV parsing
+// Memory storage for fast CV parsing (limit 5MB for CV analysis)
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
-        fileSize: 10 * 1024 * 1024, // 10MB
+        fileSize: 5 * 1024 * 1024, // 5MB
     },
 });
+
+// Middleware to accept either 'cv' or 'file' field name
+const uploadCVFile = (req, res, next) => {
+    upload.single('cv')(req, res, (err) => {
+        if (err) return next(err);
+        if (req.file) return next();
+        upload.single('file')(req, res, next);
+    });
+};
 
 // AI Chatbot: Public or logged in
 router.post('/ai/chat', optionalAuthenticateToken, aiController.processChat);
 
-// AI CV File Matching (PDF, DOCX, TXT upload)
-router.post('/ai/match-cv-file', optionalAuthenticateToken, upload.single('file'), aiController.analyzeCVFile);
+// AI CV Analysis to Recommended Industries (New Candidate Feature)
+router.post('/ai/cv-analysis', optionalAuthenticateToken, uploadCVFile, aiController.analyzeCV);
+router.get('/ai/cv-analysis/history', authenticateToken, authorizeRoles('candidate'), aiController.getCVAnalysisHistory);
 
 // AI CV Auto-Extraction to structured data
-router.post('/ai/parse-cv-file', upload.single('file'), aiController.parseCVFile);
+router.post('/ai/parse-cv-file', uploadCVFile, aiController.parseCVFile);
 
 // Protected candidate AI routes
-router.post('/ai/match-analysis', authenticateToken, authorizeRoles('candidate'), aiController.analyzeMatch);
-router.get('/ai/job-suggestions', authenticateToken, authorizeRoles('candidate'), aiController.getJobSuggestions);
 router.get('/ai/skill-advice', authenticateToken, authorizeRoles('candidate'), aiController.getSkillAdvice);
 router.post('/ai/career-guidance', authenticateToken, authorizeRoles('candidate'), aiController.getCareerGuidance);
 

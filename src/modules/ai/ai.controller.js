@@ -13,20 +13,20 @@ const processChat = async (req, res, next) => {
     }
 };
 
-const analyzeMatch = async (req, res, next) => {
+const analyzeCV = async (req, res, next) => {
     try {
-        const analysis = await aiService.analyzeMatch(req.user.id, req.body);
-        return sendResponse(res, 200, 'Phân tích mức độ phù hợp thành công', analysis);
+        const accountId = req.user?.id || null;
+        const result = await aiService.analyzeCVToIndustries(accountId, req.file);
+        return sendResponse(res, 200, 'Phân tích CV và gợi ý ngành nghề phù hợp thành công', result);
     } catch (error) {
         next(error);
     }
 };
 
-const analyzeCVFile = async (req, res, next) => {
+const getCVAnalysisHistory = async (req, res, next) => {
     try {
-        const accountId = req.user?.id || null;
-        const analysis = await aiService.analyzeCVFile(accountId, req.file, req.body);
-        return sendResponse(res, 200, 'Phân tích tệp CV bằng AI thành công', analysis);
+        const history = await aiService.getCVAnalysisHistory(req.user.id);
+        return sendResponse(res, 200, 'Lấy lịch sử phân tích CV thành công', history);
     } catch (error) {
         next(error);
     }
@@ -36,15 +36,6 @@ const parseCVFile = async (req, res, next) => {
     try {
         const data = await aiService.parseCVToStructuredData(req.file);
         return sendResponse(res, 200, 'Trích xuất thông tin CV bằng AI thành công', data);
-    } catch (error) {
-        next(error);
-    }
-};
-
-const getJobSuggestions = async (req, res, next) => {
-    try {
-        const suggestions = await aiService.getJobSuggestions(req.user.id);
-        return sendResponse(res, 200, 'Gợi ý tin tuyển dụng phù hợp từ AI', suggestions);
     } catch (error) {
         next(error);
     }
@@ -131,10 +122,9 @@ const getDashboardInsight = async (req, res, next) => {
 
 module.exports = {
     processChat,
-    analyzeMatch,
-    analyzeCVFile,
+    analyzeCV,
+    getCVAnalysisHistory,
     parseCVFile,
-    getJobSuggestions,
     getSkillAdvice,
     getCareerGuidance,
     rankCVs,

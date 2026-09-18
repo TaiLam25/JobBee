@@ -6,21 +6,21 @@ const logger = require('../../config/logger');
  */
 class LLMClient {
     constructor() {
-        this.geminiApiKey = process.env.GEMINI_API_KEY || '';
-        this.openaiApiKey = process.env.OPENAI_API_KEY || '';
+        this.geminiApiKey = process.env.AI_API_KEY || process.env.GEMINI_API_KEY || '';
+        this.openaiApiKey = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || '';
         this.geminiModel = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
     }
 
     /**
      * Call Google Gemini REST API with candidate model fallback
      */
-    async generateWithGemini(prompt, systemInstruction = '') {
-        const apiKey = this.geminiApiKey || process.env.GEMINI_API_KEY;
+    async generateWithGemini(prompt, systemInstruction = '', timeoutMs = 30000) {
+        const apiKey = this.geminiApiKey || process.env.AI_API_KEY || process.env.GEMINI_API_KEY;
         if (!apiKey) {
-            throw new Error('GEMINI_API_KEY is not configured');
+            throw new Error('GEMINI_API_KEY/AI_API_KEY is not configured');
         }
 
-        const candidateModels = [this.geminiModel, 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-flash-latest'];
+        const candidateModels = [this.geminiModel, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
         const uniqueModels = [...new Set(candidateModels.filter(Boolean))];
 
         const contents = [];
@@ -47,10 +47,11 @@ class LLMClient {
                 const response = await fetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    signal: AbortSignal.timeout(timeoutMs),
                     body: JSON.stringify({
                         contents,
                         generationConfig: {
-                            temperature: 0.6,
+                            temperature: 0.4,
                             maxOutputTokens: 2048,
                         }
                     })
@@ -78,10 +79,10 @@ class LLMClient {
     /**
      * Call OpenAI compatible API
      */
-    async generateWithOpenAI(prompt, systemInstruction = '') {
-        const apiKey = this.openaiApiKey || process.env.OPENAI_API_KEY;
+    async generateWithOpenAI(prompt, systemInstruction = '', timeoutMs = 30000) {
+        const apiKey = this.openaiApiKey || process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
         if (!apiKey) {
-            throw new Error('OPENAI_API_KEY is not configured');
+            throw new Error('OPENAI_API_KEY/AI_API_KEY is not configured');
         }
 
         const url = 'https://api.openai.com/v1/chat/completions';
@@ -97,10 +98,11 @@ class LLMClient {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${apiKey}`
             },
+            signal: AbortSignal.timeout(timeoutMs),
             body: JSON.stringify({
                 model: 'gpt-4o-mini',
                 messages,
-                temperature: 0.6,
+                temperature: 0.4,
             })
         });
 
@@ -116,20 +118,20 @@ class LLMClient {
     /**
      * Unified text generation with smart fallback
      */
-    async generate(prompt, systemInstruction = '') {
+    async generate(prompt, systemInstruction = '', timeoutMs = 30000) {
         // 1. Try Gemini if configured
-        if (this.geminiApiKey || process.env.GEMINI_API_KEY) {
+        if (this.geminiApiKey || process.env.AI_API_KEY || process.env.GEMINI_API_KEY) {
             try {
-                return await this.generateWithGemini(prompt, systemInstruction);
+                return await this.generateWithGemini(prompt, systemInstruction, timeoutMs);
             } catch (err) {
                 logger.warn(`Gemini API call failed, trying fallback: ${err.message}`);
             }
         }
 
         // 2. Try OpenAI if configured
-        if (this.openaiApiKey || process.env.OPENAI_API_KEY) {
+        if (this.openaiApiKey || process.env.AI_API_KEY || process.env.OPENAI_API_KEY) {
             try {
-                return await this.generateWithOpenAI(prompt, systemInstruction);
+                return await this.generateWithOpenAI(prompt, systemInstruction, timeoutMs);
             } catch (err) {
                 logger.warn(`OpenAI API call failed: ${err.message}`);
             }

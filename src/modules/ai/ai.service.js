@@ -5,6 +5,8 @@ const profileModel = require('../profile/profile.model');
 const AppError = require('../../utils/app-error');
 const llmClient = require('./llm.client');
 const { extractTextFromBuffer } = require('../../utils/document-parser');
+const db = require('../../config/db');
+const logger = require('../../config/logger');
 
 /**
  * 1. AI Chatbot (Hỏi đáp, tư vấn việc làm, giải thích thuật ngữ)
@@ -64,213 +66,219 @@ Nhiệm vụ của bạn là hỗ trợ Ứng viên và Nhà tuyển dụng:
 };
 
 /**
- * 2. Phân tích mức độ phù hợp giữa CV lưu trên hệ thống và Tin tuyển dụng
+ * 2. Phân tích CV bằng AI: Trích xuất nội dung và gợi ý danh sách ngành nghề phù hợp
  */
-const analyzeMatch = async (accountId, { cv_id, job_id }) => {
-    const job = await jobModel.getJobById(job_id);
-    if (!job) {
-        throw new AppError(404, 'Không tìm thấy tin tuyển dụng');
-    }
-
-    let cvData = null;
-    if (cv_id) {
-        cvData = await profileModel.getCVVersionById(accountId, cv_id);
-    } else {
-        const cvs = await profileModel.getCVVersions(accountId);
-        cvData = cvs.find(c => c.is_default) || cvs[0] || null;
-    }
-
-    const profile = await profileModel.getProfileByAccountId(accountId);
-
-    const prompt = `Phân tích mức độ phù hợp giữa CV của ứng viên và Tin tuyển dụng sau:
-
-[TIN TUYỂN DỤNG]:
-- Tiêu đề: ${job.title}
-- Mô tả: ${job.job_description}
-- Yêu cầu: ${job.requirements}
-- Mức lương: ${job.is_negotiable ? 'Thỏa thuận' : (job.salary_min === job.salary_max ? `${job.salary_min} VNĐ` : `${job.salary_min} - ${job.salary_max} VNĐ`)}
-- Loại hình: ${job.job_type}
-
-[HỒ SƠ ỨNG VIÊN]:
-- Họ tên: ${profile?.full_name || 'Ứng viên'}
-- Định hướng CV: ${cvData?.career_orientation || 'Chung'}
-- Kỹ năng: ${profile?.skills || 'Chưa cập nhật'}
-- Học vấn: ${profile?.education || 'Chưa cập nhật'}
-- Kinh nghiệm: ${profile?.experience || 'Chưa cập nhật'}
-- Nội dung CV: ${JSON.stringify(cvData?.cv_content || {})}
-
-YÊU CẦU: Trả về ĐÚNG định dạng JSON sau (không kèm markdown ngoài):
-{
-  "match_score": <số nguyên từ 0 đến 100>,
-  "strengths": ["điểm mạnh 1", "điểm mạnh 2"],
-  "missing_skills": ["kỹ năng cần bổ sung 1", "kỹ năng cần bổ sung 2"],
-  "recommendations": ["lời khuyên 1", "lời khuyên 2"]
-}`;
-
-    let analysis = null;
-    try {
-        const aiResponse = await llmClient.generate(prompt, 'Bạn là chuyên gia phân tích tuyển dụng và ATS AI. Luôn trả về định dạng JSON hợp lệ.');
-        if (aiResponse) {
-            const cleanJson = aiResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-            analysis = JSON.parse(cleanJson);
-        }
-    } catch (err) {
-        console.error('LLM Match Analysis Error:', err.message);
-    }
-
-    // Heuristic Fallback
-    if (!analysis || typeof analysis.match_score !== 'number') {
-        const candSkills = (profile?.skills || '').toLowerCase();
-        const jobReqs = (job.requirements || '').toLowerCase();
-        
-        let score = 70;
-        const strengths = [];
-        const missing = [];
-
-        ['react', 'node', 'javascript', 'typescript', 'sql', 'python', 'java', 'docker', 'figma'].forEach(tech => {
-            if (jobReqs.includes(tech)) {
-                if (candSkills.includes(tech)) {
-                    score += 5;
-                    strengths.push(`Kỹ năng ${tech.toUpperCase()} đáp ứng đúng yêu cầu.`);
-                } else {
-                    missing.push(`Cần nâng cao kinh nghiệm với ${tech.toUpperCase()}.`);
-                }
-            }
-        });
-
-        score = Math.min(Math.max(score, 60), 98);
-        if (strengths.length === 0) strengths.push('Kinh nghiệm nền tảng phù hợp với định hướng công việc');
-        if (missing.length === 0) missing.push('Bổ sung thêm các chứng chỉ chuyên môn và dự án thực tế');
-
-        analysis = {
-            match_score: score,
-            strengths,
-            missing_skills: missing,
-            recommendations: [
-                'Tùy chỉnh phần tóm tắt mở đầu của CV để nhấn mạnh các từ khóa chính trong tin tuyển dụng.',
-                'Đính kèm đường dẫn GitHub/Portfolio minh chứng cho các kỹ năng đã nêu.'
-            ],
-        };
-    }
-
-    if (accountId) {
-        try {
-            await aiModel.saveChatSession({
-                account_id: accountId,
-                question: `Phân tích mức độ phù hợp cho tin: ${job.title} (ID: ${job_id})`,
-                support_type: 'fit_analysis',
-                analysis_result: analysis,
-            });
-        } catch (dbErr) {
-            console.error('Error saving match analysis session:', dbErr.message);
-        }
-    }
-
-    return analysis;
-};
-
-/**
- * 3. Phân tích trực tiếp từ FILE CV (PDF, DOCX, TXT) được tải lên
- */
-const analyzeCVFile = async (accountId, file, { job_id, job_description, requirements, title }) => {
-    if (!file) {
+const analyzeCVToIndustries = async (accountId, file) => {
+    if (!file || !file.buffer) {
         throw new AppError(400, 'Vui lòng tải lên tệp CV (PDF hoặc DOCX)');
     }
 
-    // 1. Extract text from file buffer
-    const cvText = await extractTextFromBuffer(file.buffer, file.mimetype, file.originalname);
-    if (!cvText || cvText.length < 20) {
-        throw new AppError(400, 'Không thể đọc nội dung văn bản từ tệp CV tải lên. Vui lòng kiểm tra lại định dạng tệp.');
+    // 1. Kiểm tra kích thước (tối đa 5MB)
+    const MAX_FILE_SIZE = 5 * 1024 * 1024;
+    if (file.size > MAX_FILE_SIZE) {
+        throw new AppError(400, 'Kích thước tệp CV vượt quá giới hạn 5MB');
     }
 
-    // 2. Resolve job details
-    let jobInfo = {
-        title: title || 'Vị trí tuyển dụng',
-        job_description: job_description || '',
-        requirements: requirements || '',
-        salary: 'Thỏa thuận',
+    // 2. Trích xuất text từ tệp
+    const extractedText = await extractTextFromBuffer(file.buffer, file.mimetype, file.originalname);
+    if (!extractedText || extractedText.trim().length < 20) {
+        throw new AppError(400, 'Không thể đọc nội dung văn bản từ tệp CV đã tải lên. Vui lòng đảm bảo tệp chứa văn bản có thể đọc được.');
+    }
+
+    // 3. Lấy danh sách ngành nghề thật trong hệ thống từ DB
+    const indRes = await db.query('SELECT id, name, slug FROM industry ORDER BY id ASC');
+    const validIndustries = indRes.rows;
+
+    const industriesListPrompt = validIndustries.map(ind => `- ID ${ind.id}: "${ind.name}"`).join('\n');
+
+    const prompt = `Bạn là Chuyên gia Tư vấn Hướng nghiệp và Phân tích Hồ sơ Tuyển dụng (AI Career Advisor).
+Dưới đây là toàn bộ nội dung trích xuất từ CV của ứng viên:
+"""
+${extractedText.substring(0, 12000)}
+"""
+
+Hệ thống JobBee hiện có danh sách các Ngành nghề & Lĩnh vực sau:
+${industriesListPrompt}
+
+QUY TẮC BẮT BUỘC:
+1. Bạn CHỈ ĐƯỢC CHỌN các ngành nghề có trong danh sách trên. TUYỆT ĐỐI KHÔNG tự bịa ra bất kỳ tên ngành hoặc ID nào ngoài danh sách.
+2. Trả về TỐI ĐA 5 ngành nghề phù hợp nhất với kỹ năng, kinh nghiệm và định hướng trong CV.
+3. Với MỖI ngành nghề, bạn PHẢI cung cấp:
+   - "industry_id": <ID dạng số nguyên chính xác từ danh sách trên>
+   - "industry_name": <Tên ngành chính xác từ danh sách trên>
+   - "confidence_score": <Số nguyên từ 0 đến 100 thể hiện mức độ phù hợp>
+   - "reason": <Lý do chi tiết, cụ thể giải thích dựa trên kỹ năng/kinh nghiệm/dự án nào trong CV dẫn tới gợi ý ngành này (viết bằng tiếng Việt súc tích, chuyên nghiệp)>
+4. Sắp xếp danh sách theo "confidence_score" giảm dần.
+
+YÊU CẦU ĐỊNH DẠNG:
+Chỉ trả về DUY NHẤT mảng JSON hợp lệ (không kèm markdown \`\`\`json hay bất kỳ văn bản ngoài nào):
+[
+  {
+    "industry_id": 1,
+    "industry_name": "Công nghệ thông tin",
+    "confidence_score": 95,
+    "reason": "Ứng viên có kỹ năng vững chắc về phát triển phần mềm..."
+  }
+]`;
+
+    const systemInstruction = 'Bạn là hệ thống JSON API tự động. Luôn trả về duy nhất mảng JSON hợp lệ theo đúng danh sách ngành nghề được cung cấp.';
+
+    const parseAIResponse = (raw) => {
+        if (!raw) return null;
+        try {
+            const clean = raw.replace(/```json/gi, '').replace(/```/gi, '').trim();
+            const jsonStart = clean.indexOf('[');
+            const jsonEnd = clean.lastIndexOf(']');
+            if (jsonStart === -1 || jsonEnd === -1) return null;
+            const parsed = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
+            if (!Array.isArray(parsed) || parsed.length === 0) return null;
+
+            const formatted = [];
+            for (const item of parsed) {
+                const matched = validIndustries.find(v => v.id === Number(item.industry_id)) ||
+                                validIndustries.find(v => v.name.toLowerCase().trim() === (item.industry_name || '').toLowerCase().trim());
+                if (matched) {
+                    const score = Math.min(Math.max(Math.round(Number(item.confidence_score) || 75), 20), 99);
+                    const reason = item.reason && typeof item.reason === 'string' && item.reason.trim().length > 5
+                        ? item.reason.trim()
+                        : `Kỹ năng và kinh nghiệm trong CV phù hợp với lĩnh vực ${matched.name}.`;
+
+                    if (!formatted.some(f => f.industry_id === matched.id)) {
+                        formatted.push({
+                            industry_id: matched.id,
+                            industry_name: matched.name,
+                            confidence_score: score,
+                            reason: reason,
+                        });
+                    }
+                }
+            }
+            if (formatted.length === 0) return null;
+            formatted.sort((a, b) => b.confidence_score - a.confidence_score);
+            return formatted.slice(0, 5);
+        } catch (e) {
+            return null;
+        }
     };
 
-    if (job_id) {
-        const job = await jobModel.getJobById(job_id);
-        if (job) {
-            jobInfo = job;
-        }
-    }
+    let matchedIndustries = null;
 
-    // 3. Prompt Gemini AI with parsed CV text & Job Details
-    const prompt = `Bạn là hệ thống AI ATS chuyên gia phân tích và chấm điểm CV so với Yêu cầu tuyển dụng.
-
-[NỘI DUNG TỆP CV ỨNG VIÊN TẢI LÊN (${file.originalname})]:
-"""
-${cvText.slice(0, 4000)}
-"""
-
-[THÔNG TIN VỊ TRÍ TUYỂN DỤNG]:
-- Tiêu đề: ${jobInfo.title}
-- Mô tả công việc: ${jobInfo.job_description}
-- Yêu cầu kỹ năng: ${jobInfo.requirements}
-
-YÊU CẦU: Phân tích chi tiết và trả về ĐÚNG định dạng JSON sau (không kèm markdown ngoài):
-{
-  "match_score": <số nguyên từ 0 đến 100>,
-  "parsed_cv_summary": "<Tóm tắt 2-3 câu về ứng viên: họ tên nếu có, chuyên môn chính, số năm kinh nghiệm>",
-  "strengths": ["Điểm mạnh 1 so với yêu cầu", "Điểm mạnh 2"],
-  "missing_skills": ["Kỹ năng hoặc chứng chỉ còn thiếu 1", "Kỹ năng còn thiếu 2"],
-  "recommendations": ["Lời khuyên để nâng cao tỷ lệ trúng tuyển 1", "Lời khuyên 2"]
-}`;
-
-    let result = null;
+    // Lần gọi 1
     try {
-        const aiResponse = await llmClient.generate(prompt, 'Bạn là chuyên gia phân tích CV bằng AI. Luôn trả về đúng JSON.');
-        if (aiResponse) {
-            const cleanJson = aiResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-            result = JSON.parse(cleanJson);
-        }
+        const aiResponse1 = await llmClient.generate(prompt, systemInstruction, 30000);
+        matchedIndustries = parseAIResponse(aiResponse1);
     } catch (err) {
-        console.error('LLM File Analysis Error:', err.message);
+        logger.warn(`AI CV Analysis call 1 failed: ${err.message}`);
     }
 
-    // Fallback heuristic if LLM error
-    if (!result || typeof result.match_score !== 'number') {
-        const textLower = cvText.toLowerCase();
-        let score = 75;
-        const strengths = ['Tệp CV có cấu trúc rõ ràng và thông tin kinh nghiệm liên quan'];
-        const missing = [];
-
-        ['react', 'node', 'javascript', 'typescript', 'python', 'java', 'sql', 'docker'].forEach(tech => {
-            if (textLower.includes(tech)) {
-                score += 3;
-                strengths.push(`Có kỹ năng ${tech.toUpperCase()} được đề cập trong tệp CV.`);
-            }
-        });
-
-        result = {
-            match_score: Math.min(Math.max(score, 65), 95),
-            parsed_cv_summary: `Đã phân tích tệp ${file.originalname}. Ứng viên có kỹ năng nền tảng phù hợp với vị trí ${jobInfo.title}.`,
-            strengths,
-            missing_skills: missing.length > 0 ? missing : ['Bổ sung thêm các số liệu định lượng (metrics) và liên kết dự án thực tế.'],
-            recommendations: [
-                'Nêu rõ các thành tựu nổi bật trong các dự án gần đây nhất.',
-                'Căn chỉnh từ khóa chuyên ngành trong CV khớp với bản mô tả công việc.'
-            ],
-        };
+    // Cơ chế Retry 1 lần nếu kết quả không hợp lệ
+    if (!matchedIndustries) {
+        try {
+            const retryPrompt = `${prompt}\n\nLƯU Ý QUAN TRỌNG: Bạn vừa trả về sai định dạng. Hãy chắc chắn trả về DUY NHẤT một mảng JSON hợp lệ [ { "industry_id": <number>, "industry_name": "<string>", "confidence_score": <number>, "reason": "<string>" } ]`;
+            const aiResponse2 = await llmClient.generate(retryPrompt, systemInstruction, 30000);
+            matchedIndustries = parseAIResponse(aiResponse2);
+        } catch (retryErr) {
+            logger.warn(`AI CV Analysis retry call failed: ${retryErr.message}`);
+        }
     }
 
-    result.file_name = file.originalname;
+    // Heuristic Fallback thông minh nếu AI không khả dụng hoặc lỗi định dạng
+    if (!matchedIndustries || matchedIndustries.length === 0) {
+        matchedIndustries = generateHeuristicIndustries(extractedText, validIndustries);
+    }
 
+    const summary = extractedText.replace(/\s+/g, ' ').trim().substring(0, 250);
+    const result = {
+        file_name: file.originalname,
+        extracted_summary: summary + (extractedText.length > 250 ? '...' : ''),
+        industries: matchedIndustries,
+        analyzed_at: new Date(),
+    };
+
+    // 4. Lưu lại lịch sử vào bảng AIChatSession
     if (accountId) {
         try {
             await aiModel.saveChatSession({
                 account_id: accountId,
-                question: `Phân tích tệp CV tải lên: ${file.originalname} cho vị trí ${jobInfo.title}`,
-                support_type: 'file_match_analysis',
+                question: `Phân tích CV: ${file.originalname}`,
+                support_type: 'fit_analysis',
                 analysis_result: result,
             });
-        } catch (dbErr) {}
+        } catch (dbErr) {
+            logger.error(`Error saving CV analysis session: ${dbErr.message}`);
+        }
     }
 
     return result;
+};
+
+/**
+ * Heuristic mapping từ nội dung CV sang danh sách Industry thực tế
+ */
+const generateHeuristicIndustries = (text, validIndustries) => {
+    const textLower = (text || '').toLowerCase();
+
+    const industryKeywords = {
+        1: ['react', 'node', 'javascript', 'typescript', 'python', 'java', 'c++', 'c#', '.net', 'golang', 'rust', 'sql', 'nosql', 'mongodb', 'postgresql', 'developer', 'frontend', 'backend', 'fullstack', 'devops', 'software', 'cloud', 'aws', 'docker', 'lập trình', 'công nghệ thông tin', 'it', 'kỹ sư phần mềm', 'web', 'mobile', 'flutter', 'react native', 'ios', 'android', 'git', 'api', 'microservices'],
+        2: ['bán hàng', 'kinh doanh', 'sales', 'telesales', 'b2b', 'b2c', 'doanh số', 'kpi', 'đàm phán', 'khách hàng', 'thị trường', 'chốt sales', 'tư vấn bán hàng', 'account executive', 'business development'],
+        3: ['marketing', 'seo', 'content', 'truyền thông', 'facebook ads', 'google ads', 'tiktok ads', 'digital marketing', 'copywriter', 'bài viết', 'fanpage', 'quảng cáo', 'branding', 'pr', 'sự kiện', 'social media', 'sáng tạo nội dung', 'chiến dịch'],
+        4: ['nhà hàng', 'khách sạn', 'phục vụ', 'pha chế', 'barista', 'lễ tân', 'bếp', 'phụ bếp', 'thu ngân', 'buồng phòng', 'hospitality', 'waiter', 'waitress', 'bartender', 'f&b', 'ẩm thực'],
+        5: ['thiết kế', 'đồ họa', 'figma', 'photoshop', 'illustrator', 'ui', 'ux', 'graphic design', 'banner', 'mockup', 'video', 'dựng video', 'premiere', 'after effects', 'canva', '3d', 'blender', 'typography'],
+        6: ['kế toán', 'tài chính', 'ngân hàng', 'kiểm toán', 'thuế', 'hóa đơn', 'báo cáo tài chính', 'chứng từ', 'sổ sách', 'excel', 'ngân sách', 'chi phí', 'kế toán trưởng', 'kế toán tổng hợp', 'finance', 'accounting'],
+        7: ['giao hàng', 'kho vận', 'logistics', 'supply chain', 'vận chuyển', 'xuất nhập khẩu', 'hải quan', 'thủ kho', 'kiểm kê', 'đơn hàng', 'shipper', 'kho bãi', 'điều phối'],
+        8: ['hành chính', 'nhân sự', 'tuyển dụng', 'hr', 'human resources', 'payroll', 'bảo hiểm', 'chấm công', 'văn thư', 'hợp đồng lao động', 'đào tạo', 'nội quy', 'công đoàn'],
+        9: ['chăm sóc khách hàng', 'cskh', 'customer service', 'support', 'tư vấn viên', 'tổng đài', 'trực chat', 'giải quyết khiếu nại', 'hỗ trợ khách hàng', 'call center'],
+        10: ['giáo dục', 'đào tạo', 'giảng dạy', 'giáo viên', 'gia sư', 'trợ giảng', 'tiếng anh', 'ielts', 'toeic', 'bài giảng', 'sư phạm', 'học viên', 'lớp học', 'teacher', 'tutor'],
+        11: ['cơ khí', 'kỹ thuật', 'sản xuất', 'bảo trì', 'tự động hóa', 'cad', 'cam', 'solidworks', 'autocad', 'điện', 'điện tử', 'lắp ráp', 'vận hành máy', 'nhà máy', 'công xưởng', 'kỹ sư cơ khí'],
+        12: ['y tế', 'dược phẩm', 'dược sĩ', 'bác sĩ', 'điều dưỡng', 'khám chữa bệnh', 'thuốc', 'bệnh viện', 'phòng khám', 'chăm sóc sức khỏe', 'y tá', 'nha khoa', 'xét nghiệm'],
+        13: ['bất động sản', 'xây dựng', 'kiến trúc', 'môi giới', 'nhà đất', 'công trình', 'dự án', 'kết cấu', 'thi công', 'giám sát', 'bản vẽ', 'đo đạc', 'vật liệu xây dựng'],
+        14: ['lao động phổ thông', 'bán thời gian', 'part-time', 'thời vụ', 'phụ việc', 'đóng gói', 'bảo vệ', 'tạp vụ', 'lao công', 'công nhân', 'lắp ráp thủ công']
+    };
+
+    const scored = validIndustries.map(ind => {
+        const kws = industryKeywords[ind.id] || [];
+        let matchCount = 0;
+        const matchedKws = [];
+        for (const kw of kws) {
+            if (textLower.includes(kw)) {
+                matchCount++;
+                matchedKws.push(kw);
+            }
+        }
+
+        let score = 50 + Math.min(matchCount * 8, 45);
+        let reason = '';
+        if (matchedKws.length > 0) {
+            const sampleKws = matchedKws.slice(0, 4).map(k => `"${k}"`).join(', ');
+            reason = `CV có các từ khóa và kỹ năng chuyên môn phù hợp với ngành ${ind.name} như: ${sampleKws}.`;
+        } else {
+            score = 55;
+            reason = `Kỹ năng và nền tảng trong CV có thể phát triển tốt trong lĩnh vực ${ind.name}.`;
+        }
+
+        return {
+            industry_id: ind.id,
+            industry_name: ind.name,
+            confidence_score: Math.min(score, 98),
+            matchCount,
+            reason
+        };
+    });
+
+    scored.sort((a, b) => (b.matchCount - a.matchCount) || (b.confidence_score - a.confidence_score));
+    return scored.slice(0, 5).map(({ industry_id, industry_name, confidence_score, reason }) => ({
+        industry_id,
+        industry_name,
+        confidence_score,
+        reason
+    }));
+};
+
+/**
+ * Lấy lịch sử phân tích CV của ứng viên
+ */
+const getCVAnalysisHistory = async (accountId) => {
+    return await aiModel.getCVAnalysisHistoryByAccountId(accountId);
 };
 
 /**
@@ -337,48 +345,7 @@ YÊU CẦU: Trả về ĐÚNG định dạng JSON sau (không kèm markdown ngo�
 };
 
 /**
- * 5. Gợi ý việc làm phù hợp năng lực (Job Suggestions)
- */
-const getJobSuggestions = async (accountId) => {
-    const profile = await profileModel.getProfileByAccountId(accountId);
-    const jobsRes = await jobModel.getJobs({ limit: 20 });
-    const allJobs = jobsRes.jobs || [];
-
-    if (allJobs.length === 0) return [];
-
-    const candSkills = (profile?.skills || '').toLowerCase();
-
-    // Score jobs
-    const scoredJobs = allJobs.map(job => {
-        let score = 70;
-        const jobTitle = (job.title || '').toLowerCase();
-        const jobReq = (job.requirements || '').toLowerCase();
-
-        if (candSkills) {
-            const skills = candSkills.split(/[,;\n]/).map(s => s.trim().toLowerCase()).filter(Boolean);
-            skills.forEach(s => {
-                if (jobTitle.includes(s) || jobReq.includes(s)) {
-                    score += 8;
-                }
-            });
-        }
-
-        return {
-            ...job,
-            ai_match_score: Math.min(score, 98),
-            ai_recommendation_reason: `Phù hợp với hồ sơ kỹ năng: ${profile?.skills || 'Công nghệ thông tin'}`
-        };
-    });
-
-    scoredJobs.sort((a, b) => b.ai_match_score - a.ai_match_score);
-    return scoredJobs.slice(0, 6);
-};
-
-/**
- * 6. Tư vấn lộ trình kỹ năng cần bổ sung (Skill Advice)
- */
-/**
- * 6. Tư vấn chọn nghề & Lộ trình phát triển AI theo Sở thích, Định hướng, Thế mạnh
+ * 4. Tư vấn chọn nghề & Lộ trình phát triển AI theo Sở thích, Định hướng, Thế mạnh
  */
 const getCareerGuidance = async (accountId, { interests, goals, strengths } = {}) => {
     let profile = null;
@@ -680,10 +647,9 @@ Hãy phân tích số liệu trên thật khách quan, súc tích và thiết th
 
 module.exports = {
     processChat,
-    analyzeMatch,
-    analyzeCVFile,
+    analyzeCVToIndustries,
+    getCVAnalysisHistory,
     parseCVToStructuredData,
-    getJobSuggestions,
     getSkillAdvice,
     getCareerGuidance,
     rankCVs,
