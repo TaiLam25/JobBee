@@ -129,7 +129,6 @@ const analyzeCVToJobs = async (accountId, file, cvId) => {
             jp.id,
             jp.title,
             jp.job_type,
-            jp.salary,
             jp.salary_min,
             jp.salary_max,
             jp.is_negotiable,
@@ -139,7 +138,7 @@ const analyzeCVToJobs = async (accountId, file, cvId) => {
             jp.posted_date,
             jp.tags,
             e.company_name,
-            e.logo_url as company_logo,
+            COALESCE(e.logo_url, e.avatar_url) as company_logo,
             e.trust_score,
             e.verification_status,
             p.name as province_name
@@ -153,7 +152,21 @@ const analyzeCVToJobs = async (accountId, file, cvId) => {
         LIMIT 60
     `);
 
-    const activeJobs = jobsRes.rows;
+    const formatSalaryText = (min, max, isNegotiable) => {
+        if (isNegotiable) return 'Thỏa thuận';
+        if (min && max) {
+            if (min === max) return `${(min / 1000000).toLocaleString('vi-VN')} triệu`;
+            return `${(min / 1000000).toLocaleString('vi-VN')} - ${(max / 1000000).toLocaleString('vi-VN')} triệu`;
+        }
+        if (min) return `Từ ${(min / 1000000).toLocaleString('vi-VN')} triệu`;
+        if (max) return `Đến ${(max / 1000000).toLocaleString('vi-VN')} triệu`;
+        return 'Thỏa thuận';
+    };
+
+    const activeJobs = (jobsRes.rows || []).map(job => ({
+        ...job,
+        salary: formatSalaryText(job.salary_min, job.salary_max, job.is_negotiable)
+    }));
     const summary = extractedText.replace(/\s+/g, ' ').trim().substring(0, 250);
 
     if (!activeJobs || activeJobs.length === 0) {
