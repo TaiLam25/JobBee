@@ -257,26 +257,15 @@ Chỉ trả về DUY NHẤT mảng JSON hợp lệ (không kèm markdown \`\`\`j
 
     let matchingJobs = null;
 
-    // Lần gọi 1
+    // Lần gọi AI với timeout nhanh 10s
     try {
-        const aiResponse1 = await llmClient.generate(prompt, systemInstruction, 30000);
+        const aiResponse1 = await llmClient.generate(prompt, systemInstruction, 10000);
         matchingJobs = parseAIResponse(aiResponse1);
     } catch (err) {
         logger.warn(`AI CV to Jobs call 1 failed: ${err.message}`);
     }
 
-    // Cơ chế Retry 1 lần nếu kết quả không hợp lệ
-    if (!matchingJobs) {
-        try {
-            const retryPrompt = `${prompt}\n\nLƯU Ý QUAN TRỌNG: Hãy chắc chắn trả về DUY NHẤT một mảng JSON hợp lệ [ { "job_id": <number>, "match_score": <number>, "match_reason": "<string>" } ]`;
-            const aiResponse2 = await llmClient.generate(retryPrompt, systemInstruction, 30000);
-            matchingJobs = parseAIResponse(aiResponse2);
-        } catch (retryErr) {
-            logger.warn(`AI CV to Jobs retry call failed: ${retryErr.message}`);
-        }
-    }
-
-    // Heuristic Fallback thông minh nếu AI không khả dụng hoặc lỗi định dạng
+    // Heuristic Fallback thông minh ngay lập tức nếu AI không phản hồi hoặc lỗi định dạng
     if (!matchingJobs || matchingJobs.length === 0) {
         matchingJobs = generateHeuristicJobMatches(extractedText, activeJobs);
     }

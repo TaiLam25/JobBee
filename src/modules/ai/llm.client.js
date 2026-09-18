@@ -14,7 +14,7 @@ class LLMClient {
     /**
      * Call Google Gemini REST API with candidate model fallback
      */
-    async generateWithGemini(prompt, systemInstruction = '', timeoutMs = 30000) {
+    async generateWithGemini(prompt, systemInstruction = '', timeoutMs = 12000) {
         const apiKey = this.geminiApiKey || process.env.AI_API_KEY || process.env.GEMINI_API_KEY;
         if (!apiKey) {
             throw new Error('GEMINI_API_KEY/AI_API_KEY is not configured');
@@ -79,7 +79,7 @@ class LLMClient {
     /**
      * Call OpenAI compatible API
      */
-    async generateWithOpenAI(prompt, systemInstruction = '', timeoutMs = 30000) {
+    async generateWithOpenAI(prompt, systemInstruction = '', timeoutMs = 12000) {
         const apiKey = this.openaiApiKey || process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
         if (!apiKey) {
             throw new Error('OPENAI_API_KEY/AI_API_KEY is not configured');
@@ -118,7 +118,7 @@ class LLMClient {
     /**
      * Unified text generation with smart fallback
      */
-    async generate(prompt, systemInstruction = '', timeoutMs = 30000) {
+    async generate(prompt, systemInstruction = '', timeoutMs = 12000) {
         // 1. Try Gemini if configured
         if (this.geminiApiKey || process.env.AI_API_KEY || process.env.GEMINI_API_KEY) {
             try {
