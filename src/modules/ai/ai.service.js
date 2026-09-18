@@ -68,21 +68,59 @@ Nhiệm vụ của bạn là hỗ trợ Ứng viên và Nhà tuyển dụng:
 /**
  * 2. Phân tích CV bằng AI: Trích xuất nội dung và gợi ý danh sách Tin Tuyển Dụng phù hợp nhất
  */
-const analyzeCVToJobs = async (accountId, file) => {
-    if (!file || !file.buffer) {
-        throw new AppError(400, 'Vui lòng tải lên tệp CV (PDF hoặc DOCX)');
+const analyzeCVToJobs = async (accountId, file, cvId) => {
+    let extractedText = '';
+    let fileName = 'CV_Ung_Vien';
+
+    // 1. Trích xuất text từ tệp upload nếu có
+    if (file && file.buffer) {
+        const MAX_FILE_SIZE = 5 * 1024 * 1024;
+        if (file.size > MAX_FILE_SIZE) {
+            throw new AppError(400, 'Kích thước tệp CV vượt quá giới hạn 5MB');
+        }
+        extractedText = await extractTextFromBuffer(file.buffer, file.mimetype, file.originalname);
+        fileName = file.originalname || 'CV_Upload.pdf';
+    } else if (cvId && accountId) {
+        // 2. Lấy CV có sẵn từ tài khoản ứng viên
+        const cv = await profileModel.getCVVersionById(accountId, cvId);
+        if (!cv) {
+            throw new AppError(404, 'Không tìm thấy bản CV được chọn trong tài khoản của bạn.');
+        }
+        fileName = cv.cv_name || 'Bản CV đã lưu';
+
+        if (cv.attachment_file && (cv.attachment_file.startsWith('http://') || cv.attachment_file.startsWith('https://'))) {
+            try {
+                const response = await fetch(cv.attachment_file);
+                const arrayBuffer = await response.arrayBuffer();
+                const buffer = Buffer.from(arrayBuffer);
+                extractedText = await extractTextFromBuffer(buffer, 'application/pdf', cv.cv_name || 'cv.pdf');
+            } catch (fetchErr) {
+                logger.warn(`Failed to fetch attachment file from URL: ${fetchErr.message}`);
+            }
+        }
+
+        if (!extractedText || extractedText.trim().length < 20) {
+            const profile = await profileModel.getProfileByAccountId(accountId);
+            const parts = [];
+            parts.push(`Tên CV: ${cv.cv_name}`);
+            if (cv.career_orientation) parts.push(`Định hướng nghề nghiệp: ${cv.career_orientation}`);
+            if (cv.cv_content) {
+                parts.push(`Nội dung hồ sơ: ${typeof cv.cv_content === 'object' ? JSON.stringify(cv.cv_content) : cv.cv_content}`);
+            }
+            if (profile) {
+                if (profile.full_name) parts.push(`Ứng viên: ${profile.full_name}`);
+                if (profile.skills) parts.push(`Kỹ năng: ${profile.skills}`);
+                if (profile.experience) parts.push(`Kinh nghiệm làm việc: ${profile.experience}`);
+                if (profile.education) parts.push(`Học vấn: ${profile.education}`);
+            }
+            extractedText = parts.join('\n');
+        }
+    } else {
+        throw new AppError(400, 'Vui lòng chọn một bản CV trong tài khoản hoặc tải lên tệp CV mới (PDF/DOCX)');
     }
 
-    // 1. Kiểm tra kích thước (tối đa 5MB)
-    const MAX_FILE_SIZE = 5 * 1024 * 1024;
-    if (file.size > MAX_FILE_SIZE) {
-        throw new AppError(400, 'Kích thước tệp CV vượt quá giới hạn 5MB');
-    }
-
-    // 2. Trích xuất text từ tệp
-    const extractedText = await extractTextFromBuffer(file.buffer, file.mimetype, file.originalname);
-    if (!extractedText || extractedText.trim().length < 20) {
-        throw new AppError(400, 'Không thể đọc nội dung văn bản từ tệp CV đã tải lên. Vui lòng đảm bảo tệp chứa văn bản có thể đọc được.');
+    if (!extractedText || extractedText.trim().length < 15) {
+        throw new AppError(400, 'Không thể đọc nội dung văn bản từ bản CV đã chọn. Vui lòng đảm bảo tệp chứa văn bản có thể đọc được.');
     }
 
     // 3. Lấy danh sách các tin tuyển dụng đang hoạt động trong DB
@@ -98,10 +136,8 @@ const analyzeCVToJobs = async (accountId, file) => {
             jp.location,
             jp.job_description,
             jp.requirements,
-            jp.benefits,
-            jp.skills_required,
             jp.posted_date,
-            jp.deadline,
+            jp.tags,
             e.company_name,
             e.logo_url as company_logo,
             e.trust_score,
@@ -110,10 +146,9 @@ const analyzeCVToJobs = async (accountId, file) => {
         FROM job_posting jp
         JOIN employer e ON jp.employer_id = e.id
         LEFT JOIN province p ON jp.province_id = p.id
-        LEFT JOIN small_job_posting sjp ON jp.id = sjp.id
+        LEFT JOIN small_job_posting sjp ON jp.id = sjp.job_posting_id
         WHERE jp.approval_status = 'approved'
           AND (sjp.is_closed IS NULL OR sjp.is_closed = FALSE)
-          AND (jp.deadline IS NULL OR jp.deadline >= CURRENT_DATE)
         ORDER BY jp.posted_date DESC
         LIMIT 60
     `);
@@ -123,7 +158,7 @@ const analyzeCVToJobs = async (accountId, file) => {
 
     if (!activeJobs || activeJobs.length === 0) {
         const result = {
-            file_name: file.originalname,
+            file_name: fileName,
             extracted_summary: summary + (extractedText.length > 250 ? '...' : ''),
             matching_jobs: [],
             analyzed_at: new Date(),
@@ -133,8 +168,8 @@ const analyzeCVToJobs = async (accountId, file) => {
 
     const jobListPrompt = activeJobs.map(j => {
         const reqs = (j.requirements || j.job_description || '').replace(/\s+/g, ' ').substring(0, 180);
-        const skills = j.skills_required || '';
-        return `- Tin ID ${j.id}: Tiêu đề: "${j.title}" | Công ty: "${j.company_name}" | Địa điểm: "${j.province_name || j.location}" ${skills ? `| Kỹ năng: ${skills}` : ''} | Yêu cầu tóm tắt: ${reqs}`;
+        const tags = Array.isArray(j.tags) && j.tags.length > 0 ? `| Ngành/Từ khóa: ${j.tags.join(', ')}` : '';
+        return `- Tin ID ${j.id}: Tiêu đề: "${j.title}" | Công ty: "${j.company_name}" | Địa điểm: "${j.province_name || j.location}" ${tags} | Yêu cầu tóm tắt: ${reqs}`;
     }).join('\n');
 
     const prompt = `Bạn là Chuyên gia Tuyển dụng và So khớp Hồ sơ Việc làm AI (AI Job Matching Specialist).
@@ -228,7 +263,7 @@ Chỉ trả về DUY NHẤT mảng JSON hợp lệ (không kèm markdown \`\`\`j
     }
 
     const result = {
-        file_name: file.originalname,
+        file_name: fileName,
         extracted_summary: summary + (extractedText.length > 250 ? '...' : ''),
         matching_jobs: matchingJobs,
         analyzed_at: new Date(),
@@ -239,7 +274,7 @@ Chỉ trả về DUY NHẤT mảng JSON hợp lệ (không kèm markdown \`\`\`j
         try {
             await aiModel.saveChatSession({
                 account_id: accountId,
-                question: `Phân tích CV tìm việc: ${file.originalname}`,
+                question: `Phân tích CV tìm việc: ${fileName}`,
                 support_type: 'fit_analysis',
                 analysis_result: result,
             });
