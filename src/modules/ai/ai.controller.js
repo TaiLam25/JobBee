@@ -16,8 +16,8 @@ const processChat = async (req, res, next) => {
 const analyzeCV = async (req, res, next) => {
     try {
         const accountId = req.user?.id || null;
-        const result = await aiService.analyzeCVToIndustries(accountId, req.file);
-        return sendResponse(res, 200, 'Phân tích CV và gợi ý ngành nghề phù hợp thành công', result);
+        const result = await aiService.analyzeCVToJobs(accountId, req.file);
+        return sendResponse(res, 200, 'Phân tích CV và gợi ý các tin tuyển dụng phù hợp thành công', result);
     } catch (error) {
         next(error);
     }
