@@ -219,12 +219,56 @@ const getAdminAnalytics = async (range = '30d') => {
         totalAppsRes,
         pendingEmployersRes,
         pendingJobsRes,
+        aiStatsRes,
+        smallJobStatsRes,
+        provinceStatsRes,
+        industryStatsRes,
+        salaryStatsRes,
     ] = await Promise.all([
         db.query(`SELECT role, COUNT(*)::int as count FROM account GROUP BY role`),
         db.query(`SELECT approval_status, COUNT(*)::int as count FROM job_posting GROUP BY approval_status`),
         db.query(`SELECT COUNT(*)::int as count FROM job_application`),
         db.query(`SELECT COUNT(*)::int as count FROM employer WHERE verification_status = 'pending'`),
         db.query(`SELECT COUNT(*)::int as count FROM job_posting WHERE approval_status = 'pending' AND job_type = 'full_time'`),
+        db.query(`
+            SELECT 
+                COUNT(*)::int as total_sessions,
+                COALESCE(COUNT(*) FILTER (WHERE support_type = 'fit_analysis'), 0)::int as cv_analyses,
+                COALESCE(COUNT(*) FILTER (WHERE support_type = 'chatbot'), 0)::int as chatbot_chats
+            FROM ai_chat_session
+        `),
+        db.query(`
+            SELECT 
+                COUNT(*)::int as total_small_jobs,
+                COALESCE(COUNT(*) FILTER (WHERE is_closed = FALSE), 0)::int as active_small_jobs,
+                COALESCE((SELECT COUNT(*)::int FROM small_job_registration), 0)::int as total_registrations
+            FROM small_job_posting
+        `),
+        db.query(`
+            SELECT p.name, COUNT(jp.id)::int as count 
+            FROM province p 
+            JOIN job_posting jp ON p.id = jp.province_id 
+            GROUP BY p.name 
+            ORDER BY count DESC 
+            LIMIT 6
+        `),
+        db.query(`
+            SELECT ind.name as industry_name, COUNT(ji.job_posting_id)::int as count 
+            FROM industry ind 
+            JOIN job_industry ji ON ind.id = ji.industry_id 
+            GROUP BY ind.id, ind.name 
+            ORDER BY count DESC 
+            LIMIT 8
+        `),
+        db.query(`
+            SELECT 
+                COALESCE(COUNT(*) FILTER (WHERE is_negotiable = TRUE), 0)::int as negotiable,
+                COALESCE(COUNT(*) FILTER (WHERE is_negotiable = FALSE AND salary_max <= 10000000), 0)::int as under_10m,
+                COALESCE(COUNT(*) FILTER (WHERE is_negotiable = FALSE AND salary_min >= 10000000 AND salary_max <= 20000000), 0)::int as from_10m_to_20m,
+                COALESCE(COUNT(*) FILTER (WHERE is_negotiable = FALSE AND salary_min >= 20000000 AND salary_max <= 30000000), 0)::int as from_20m_to_30m,
+                COALESCE(COUNT(*) FILTER (WHERE is_negotiable = FALSE AND salary_min >= 30000000), 0)::int as above_30m
+            FROM job_posting
+        `),
     ]);
 
     // Accounts Growth Series
@@ -315,28 +359,6 @@ const getAdminAnalytics = async (range = '30d') => {
     const jobPrevHours = parseFloat(jobTimeRes.rows[0]?.prev_period_hours || '1.8');
     const jobDiff = jobPrevHours > 0 ? Math.round(((jobHours - jobPrevHours) / jobPrevHours) * 100) : -25;
 
-    // Jobs By Industry / Category
-    const industryRes = await db.query(`
-        SELECT 
-            CASE 
-                WHEN title ILIKE '%react%' OR title ILIKE '%frontend%' OR title ILIKE '%front-end%' THEN 'Frontend / Web'
-                WHEN title ILIKE '%node%' OR title ILIKE '%backend%' OR title ILIKE '%back-end%' OR title ILIKE '%java%' OR title ILIKE '%python%' THEN 'Backend / Systems'
-                WHEN title ILIKE '%fullstack%' OR title ILIKE '%full-stack%' THEN 'Fullstack Dev'
-                WHEN title ILIKE '%mobile%' OR title ILIKE '%flutter%' OR title ILIKE '%ios%' OR title ILIKE '%android%' THEN 'Mobile Apps'
-                WHEN title ILIKE '%ui%' OR title ILIKE '%ux%' OR title ILIKE '%design%' THEN 'UI/UX Design'
-                WHEN title ILIKE '%qa%' OR title ILIKE '%tester%' OR title ILIKE '%test%' THEN 'QA & Testing'
-                WHEN title ILIKE '%devops%' OR title ILIKE '%cloud%' OR title ILIKE '%aws%' THEN 'DevOps & Cloud'
-                WHEN title ILIKE '%data%' OR title ILIKE '%ai%' OR title ILIKE '%machine learning%' THEN 'Data & AI'
-                WHEN job_type = 'small_job' THEN 'Small Job / Phục vụ - Sự kiện'
-                ELSE 'Bán lẻ, Dịch vụ & Khác'
-            END as industry_name,
-            COUNT(*)::int as count
-        FROM job_posting
-        GROUP BY industry_name
-        ORDER BY count DESC
-        LIMIT 8
-    `);
-
     return {
         range,
         isDemoMode: process.env.AUTO_APPROVE_DEMO === 'true',
@@ -350,6 +372,11 @@ const getAdminAnalytics = async (range = '30d') => {
             totalJobs: jobsStatusRes.rows.reduce((sum, r) => sum + r.count, 0),
             jobsByStatus: jobsStatusRes.rows,
             totalApplications: totalAppsRes.rows[0].count,
+            totalSmallJobs: smallJobStatsRes.rows[0]?.total_small_jobs || 0,
+            activeSmallJobs: smallJobStatsRes.rows[0]?.active_small_jobs || 0,
+            smallJobRegistrations: smallJobStatsRes.rows[0]?.total_registrations || 0,
+            aiCvAnalyses: aiStatsRes.rows[0]?.cv_analyses || 0,
+            aiChatbotSessions: aiStatsRes.rows[0]?.chatbot_chats || 0,
         },
         accountsGrowth: accountsGrowthRes.rows,
         jobPostingsGrowth: jobGrowthRes.rows,
@@ -368,7 +395,15 @@ const getAdminAnalytics = async (range = '30d') => {
             employer: { hours: empHours, prev_hours: empPrevHours, diff_percent: empDiff },
             job: { hours: jobHours, prev_hours: jobPrevHours, diff_percent: jobDiff },
         },
-        jobsByIndustry: industryRes.rows,
+        jobsByIndustry: industryStatsRes.rows,
+        salaryBreakdown: salaryStatsRes.rows[0] || {
+            negotiable: 0,
+            under_10m: 0,
+            from_10m_to_20m: 0,
+            from_20m_to_30m: 0,
+            above_30m: 0,
+        },
+        topProvinces: provinceStatsRes.rows || [],
     };
 };
 
