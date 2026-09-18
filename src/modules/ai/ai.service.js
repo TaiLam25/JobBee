@@ -88,38 +88,44 @@ const analyzeCVToJobs = async (accountId, file, cvId) => {
         }
         fileName = cv.cv_name || 'Bản CV đã lưu';
 
-        if (cv.attachment_file && (cv.attachment_file.startsWith('http://') || cv.attachment_file.startsWith('https://'))) {
-            try {
-                const response = await fetch(cv.attachment_file);
-                const arrayBuffer = await response.arrayBuffer();
-                const buffer = Buffer.from(arrayBuffer);
-                extractedText = await extractTextFromBuffer(buffer, 'application/pdf', cv.cv_name || 'cv.pdf');
-            } catch (fetchErr) {
-                logger.warn(`Failed to fetch attachment file from URL: ${fetchErr.message}`);
+        if (cv.attachment_file) {
+            if (cv.attachment_file.startsWith('data:')) {
+                const match = cv.attachment_file.match(/^data:([^;]+);base64,(.+)$/);
+                if (match) {
+                    const mime = match[1];
+                    const buffer = Buffer.from(match[2], 'base64');
+                    extractedText = await extractTextFromBuffer(buffer, mime, cv.cv_name || 'cv.pdf');
+                }
+            } else if (cv.attachment_file.startsWith('http://') || cv.attachment_file.startsWith('https://')) {
+                try {
+                    const response = await fetch(cv.attachment_file);
+                    const mime = response.headers.get('content-type') || 'application/pdf';
+                    const arrayBuffer = await response.arrayBuffer();
+                    const buffer = Buffer.from(arrayBuffer);
+                    extractedText = await extractTextFromBuffer(buffer, mime, cv.cv_name || 'cv.pdf');
+                } catch (fetchErr) {
+                    logger.warn(`Failed to fetch attachment file from URL: ${fetchErr.message}`);
+                }
             }
         }
 
         if (!extractedText || extractedText.trim().length < 20) {
-            const profile = await profileModel.getProfileByAccountId(accountId);
             const parts = [];
-            parts.push(`Tên CV: ${cv.cv_name}`);
-            if (cv.career_orientation) parts.push(`Định hướng nghề nghiệp: ${cv.career_orientation}`);
+            parts.push(`Tên hồ sơ CV: ${cv.cv_name}`);
+            if (cv.career_orientation) parts.push(`Định hướng nghề nghiệp / Chuyên môn: ${cv.career_orientation}`);
             if (cv.cv_content) {
-                parts.push(`Nội dung hồ sơ: ${typeof cv.cv_content === 'object' ? JSON.stringify(cv.cv_content) : cv.cv_content}`);
-            }
-            if (profile) {
-                if (profile.full_name) parts.push(`Ứng viên: ${profile.full_name}`);
-                if (profile.skills) parts.push(`Kỹ năng: ${profile.skills}`);
-                if (profile.experience) parts.push(`Kinh nghiệm làm việc: ${profile.experience}`);
-                if (profile.education) parts.push(`Học vấn: ${profile.education}`);
+                const contentStr = typeof cv.cv_content === 'object' ? JSON.stringify(cv.cv_content, null, 2) : cv.cv_content;
+                parts.push(`Nội dung chi tiết hồ sơ: ${contentStr}`);
             }
             extractedText = parts.join('\n');
+        } else if (cv.career_orientation) {
+            extractedText = `[Định hướng chuyên môn: ${cv.career_orientation}]\n` + extractedText;
         }
     } else {
         throw new AppError(400, 'Vui lòng chọn một bản CV trong tài khoản hoặc tải lên tệp CV mới (PDF/DOCX)');
     }
 
-    if (!extractedText || extractedText.trim().length < 15) {
+    if (!extractedText || extractedText.trim().length < 10) {
         throw new AppError(400, 'Không thể đọc nội dung văn bản từ bản CV đã chọn. Vui lòng đảm bảo tệp chứa văn bản có thể đọc được.');
     }
 
@@ -305,44 +311,92 @@ Chỉ trả về DUY NHẤT mảng JSON hợp lệ (không kèm markdown \`\`\`j
 const generateHeuristicJobMatches = (text, activeJobs) => {
     const textLower = (text || '').toLowerCase();
 
-    const scored = activeJobs.map(job => {
-        let score = 50;
-        const matchingTerms = [];
+    // Domain keywords mapping for domain affinity
+    const DOMAINS = {
+        it: ['lập trình', 'developer', 'frontend', 'backend', 'fullstack', 'react', 'node', 'java', 'python', 'software', 'ai', 'data', 'devops', 'công nghệ thông tin', 'web', 'mobile', 'api', 'database', 'sql', 'c#', 'c++', 'server', 'mã nguồn', 'kỹ thuật', 'phần mềm'],
+        marketing: ['marketing', 'seo', 'content', 'quảng cáo', 'ads', 'truyền thông', 'copywriter', 'social media', 'branding', 'pr', 'sự kiện', 'chiến dịch', 'banner', 'fanpage', 'tiktok', 'facebook'],
+        design: ['thiết kế', 'design', 'designer', 'ui/ux', 'đồ họa', 'graphic', 'photoshop', 'figma', 'illustrator', 'banner', 'hậu kỳ', 'chụp ảnh', 'video', 'dựng phim'],
+        business: ['sales', 'kinh doanh', 'bán hàng', 'tư vấn', 'chăm sóc khách hàng', 'cskh', 'thị trường', 'doanh số', 'khách hàng', 'telesales'],
+        finance: ['kế toán', 'tài chính', 'thuế', 'kiểm toán', 'accounting', 'hóa đơn', 'sổ sách', 'báo cáo tài chính'],
+        logistics: ['kho bãi', 'logistics', 'vận chuyển', 'giao nhận', 'điều phối', 'hàng hóa', 'xuất nhập khẩu', 'kho'],
+        admin: ['nhập liệu', 'dịch thuật', 'hành chính', 'văn phòng', 'trợ lý', 'excel', 'soạn thảo', 'lưu trữ', 'hỗ trợ']
+    };
 
-        // Check title words
-        const titleWords = (job.title || '').toLowerCase().split(/[\s,/\\-]+/).filter(w => w.length > 2);
-        for (const w of titleWords) {
-            if (textLower.includes(w)) {
-                score += 8;
-                if (!matchingTerms.includes(w)) matchingTerms.push(w);
-            }
+    const domainScores = {};
+    for (const [domain, kwList] of Object.entries(DOMAINS)) {
+        let count = 0;
+        for (const kw of kwList) {
+            if (textLower.includes(kw)) count += 1;
         }
+        domainScores[domain] = count;
+    }
 
-        // Check skills required
-        if (job.skills_required) {
-            const skills = job.skills_required.toLowerCase().split(/[,;|\n]+/).map(s => s.trim()).filter(Boolean);
-            for (const s of skills) {
-                if (textLower.includes(s)) {
-                    score += 10;
-                    if (!matchingTerms.includes(s)) matchingTerms.push(s);
+    const scored = activeJobs.map(job => {
+        let score = 40;
+        const matchingTerms = [];
+        const jobCombined = `${job.title || ''} ${(job.tags || []).join(' ')} ${job.job_description || ''} ${job.requirements || ''}`.toLowerCase();
+
+        // 1. Domain synergy bonus
+        for (const [domain, kwList] of Object.entries(DOMAINS)) {
+            const cvCount = domainScores[domain] || 0;
+            if (cvCount > 0) {
+                let jobCount = 0;
+                for (const kw of kwList) {
+                    if (jobCombined.includes(kw)) {
+                        jobCount++;
+                        if (!matchingTerms.includes(kw) && matchingTerms.length < 5) matchingTerms.push(kw);
+                    }
+                }
+                if (jobCount > 0) {
+                    score += Math.min(cvCount * 4 + jobCount * 6, 35);
                 }
             }
         }
 
-        // Check requirements keywords
+        // 2. Title word matches
+        const titleWords = (job.title || '')
+            .toLowerCase()
+            .replace(/[^\w\s\u00C0-\u1EF9]/g, ' ')
+            .split(/\s+/)
+            .filter(w => w.length >= 3 && !['tuyển', 'viên', 'cho', 'và', 'các', 'của', 'với', 'gig'].includes(w));
+
+        for (const w of titleWords) {
+            if (textLower.includes(w)) {
+                score += 8;
+                if (!matchingTerms.includes(w) && matchingTerms.length < 5) matchingTerms.push(w);
+            }
+        }
+
+        // 3. Tags matches
+        if (Array.isArray(job.tags)) {
+            for (const tag of job.tags) {
+                const tagLower = (tag || '').toLowerCase();
+                if (tagLower && textLower.includes(tagLower)) {
+                    score += 12;
+                    if (!matchingTerms.includes(tagLower) && matchingTerms.length < 5) matchingTerms.push(tagLower);
+                }
+            }
+        }
+
+        // 4. Requirements matches
         if (job.requirements) {
-            const reqWords = job.requirements.toLowerCase().split(/[\s,.;:/\n]+/).filter(w => w.length > 3);
+            const reqWords = job.requirements
+                .toLowerCase()
+                .replace(/[^\w\s\u00C0-\u1EF9]/g, ' ')
+                .split(/\s+/)
+                .filter(w => w.length >= 4 && !['yêu', 'cầu', 'công', 'việc', 'kinh', 'nghiệm', 'khả', 'năng', 'trong', 'được'].includes(w));
+
             let reqMatches = 0;
             for (const w of reqWords.slice(0, 30)) {
                 if (textLower.includes(w)) reqMatches++;
             }
-            score += Math.min(reqMatches * 2, 15);
+            score += Math.min(reqMatches * 2, 14);
         }
 
-        score = Math.min(Math.max(score, 55), 96);
+        score = Math.min(Math.max(score, 45), 98);
         let reason = '';
         if (matchingTerms.length > 0) {
-            reason = `CV của bạn có các kỹ năng, từ khóa (${matchingTerms.slice(0, 3).join(', ')}) tương thích cao với yêu cầu của vị trí này.`;
+            reason = `CV của bạn có các kỹ năng, chuyên môn (${matchingTerms.slice(0, 3).join(', ')}) rất phù hợp với yêu cầu của vị trí này.`;
         } else {
             reason = `Hồ sơ năng lực của bạn phù hợp với định hướng công việc và môi trường tại ${job.company_name}.`;
         }

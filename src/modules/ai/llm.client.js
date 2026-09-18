@@ -8,7 +8,7 @@ class LLMClient {
     constructor() {
         this.geminiApiKey = process.env.AI_API_KEY || process.env.GEMINI_API_KEY || '';
         this.openaiApiKey = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || '';
-        this.geminiModel = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
+        this.geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
     }
 
     /**
@@ -20,7 +20,7 @@ class LLMClient {
             throw new Error('GEMINI_API_KEY/AI_API_KEY is not configured');
         }
 
-        const candidateModels = [this.geminiModel, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+        const candidateModels = [this.geminiModel, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
         const uniqueModels = [...new Set(candidateModels.filter(Boolean))];
 
         const contents = [];
